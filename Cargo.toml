@@ -1,0 +1,28 @@
+[package]
+name = "postgres-notify"
+version = "0.2.1"
+edition = "2024"
+autoexamples = false
+
+[dependencies]
+chrono = {version=">=0.4", features=["serde"], optional=true}
+chrono-tz = {version=">=0.10.3", features=["serde"], optional=true}
+futures = "0.3.31"
+serde = {version=">=1", features=["derive"], optional=true}
+tokio = {version=">=1", features=["rt","sync","time"]}
+tokio-postgres = ">=0.6"
+tracing = {version=">=0.1", optional=true}
+
+[dev-dependencies]
+insta = {version=">=1.42", features=["redactions","json"]}
+testcontainers = "0.24.0"
+testcontainers-modules = { version = "0.12.0", features = ["postgres"] }
+
+[features]
+default = ["chrono","serde","tracing"]
+tracing = ["dep:tracing"]
+chrono = ["dep:chrono","dep:chrono-tz"]
+serde  = ["dep:serde"]
+
+[badges]
+maintenance = {status="actively-developed"}
