@@ -37,7 +37,7 @@
 //! ```
 //!
 //!
-//! # RAISE <level> <message>
+//! # RAISE/LOGS
 //!
 //! Logs in PostgreSQL are created by issuing `RAISE <level> <message>` commands
 //! within your functions, stored procedures and scripts. When such a command is
@@ -46,8 +46,8 @@
 //!
 //! [`PGNotify`] simplifies log collection in two ways: first it provides the
 //! `subscribe_raise` function, which registers a callback. Second, it also
-//! provides the `capture_log` function, which returns the accumulated log
-//! since the last call to `capture_log`.
+//! provides the [`capture_log`](PGNotifier::capture_log) and
+//! [`with_captured_log`](PGNotifier::with_captured_log) functions.
 //!
 //! ```rust
 //! use postgres_notify::PGNotifier;
@@ -106,10 +106,13 @@ use {
 pub type NotifyCallbacks =
     Arc<RwLock<BTreeMap<String, Vec<Box<dyn for<'a> Fn(&'a PGNotify) + Send + Sync + 'static>>>>>;
 
-/// Type used to store callbacks for RAISE <level> <message> calls.
+/// Type used to store callbacks for RAISE &lt;level&gt; &lt;message&gt; calls.
 pub type RaiseCallbacks =
     Arc<RwLock<Vec<Box<dyn for<'a> Fn(&'a PGRaise) + Send + Sync + 'static>>>>;
 
+///
+/// Forwards PostgreSQL `NOTIFY` and `RAISE` commands to subscribers.
+///
 pub struct PGNotifier {
     pub client: PGClient,
     listen_handle: JoinHandle<()>,
@@ -187,7 +190,7 @@ impl PGNotifier {
     }
 
     ///
-    /// Handles the notification of RAISE <level> <message> subscribers.
+    /// Handles the notification of `RAISE <level> <message>` subscribers.
     ///
     fn handle_raise(
         callbacks: &RaiseCallbacks,
@@ -244,7 +247,7 @@ impl PGNotifier {
     }
 
     ///
-    /// Subscribes to RAISE <level> <message> notifications.
+    /// Subscribes to `RAISE <level> <message>` notifications.
     ///
     /// There is currently no mechanism to unsubscribe. This would only require
     /// returning some form of "token", which could be used to unsubscribe.
@@ -259,9 +262,10 @@ impl PGNotifier {
     /// Returns the accumulated log since the last capture.
     ///
     /// If the code being called issues many `RAISE` commands and you never
-    /// call [`capture_log`], then eventually, you might run out of memory.
-    /// To ensure that this does not happen, you might consider using
-    /// [`with_captured_log`] instead.
+    /// call [`capture_log`](PGNotifier::capture_log), then eventually, you
+    /// might run out of memory. To ensure that this does not happen, you
+    /// might consider using [`with_captured_log`](PGNotifier::with_captured_log)
+    /// instead.
     ///
     pub fn capture_log(&self) -> Option<Vec<PGRaise>> {
         if let Ok(mut guard) = self.log.write() {
@@ -302,11 +306,7 @@ impl Drop for PGNotifier {
 }
 
 ///
-/// # Message received when a `NOTIFY <channel> <payload>` is issued on PostgreSQL.
-///
-/// We will only receive notifications for channels on which we have issued a
-/// `LISTEN <channel>`. Channels of interest are declared when creating a
-/// [`PGConnPair`][crate::PGConnPair].
+/// Message received when a `NOTIFY [channel] [payload]` is issued on PostgreSQL.
 ///
 #[derive(Debug, Clone)]
 #[cfg_attr(any(feature = "serde", test), derive(serde::Serialize))]
@@ -326,9 +326,6 @@ impl PGNotify {
 
 ///
 /// # Message received when a `raise <level> <message>` is issued on PostgreSQL.
-///
-/// These notifications are received by the [`PGConnPair`][crate::PGConnPair] and can be captured
-/// using the [`capture_log`] method.
 ///
 #[derive(Debug, Clone)]
 #[cfg_attr(any(feature = "serde", test), derive(serde::Serialize))]
