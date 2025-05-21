@@ -6,6 +6,7 @@ license = "MIT"
 repository = "https://github.com/macprog-guy/postgres-notify.git"
 keywords = ["postgres","database","logs","notfiy"]
 categories = ["database","development-tools::debugging"]
+description = "Library that makes it easy to subscribe to PostgreSQL notifications"
 rust-version = "1.85"
 
 [dependencies]
