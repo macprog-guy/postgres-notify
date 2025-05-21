@@ -1,4 +1,6 @@
 ![Maintenance](https://img.shields.io/badge/maintenance-activly--developed-brightgreen.svg)
+[![Rust](https://github.com/macprog-guy/postgres-notify/actions/workflows/tests.yml/badge.svg)](https://github.com/macprog-guy/postgres-notify/actions/workflows/tests.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 # postgres-notify
 
