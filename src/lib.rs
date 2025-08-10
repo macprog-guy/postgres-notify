@@ -98,9 +98,13 @@ use {
         task::JoinHandle,
     },
     tokio_postgres::{
-        AsyncMessage, Client as PGClient, Connection as PGConnection, Notification, error::DbError,
+        AsyncMessage, Client as PGClient, Connection as PGConnection, Error as PGError,
+        Notification, error::DbError,
     },
 };
+
+/// Shorthand for Result with tokio_postgres::Error
+pub type PGResult<T> = Result<T, PGError>;
 
 /// Type used to store callbacks for LISTEN/NOTIFY calls.
 pub type NotifyCallbacks =
@@ -109,6 +113,128 @@ pub type NotifyCallbacks =
 /// Type used to store callbacks for RAISE &lt;level&gt; &lt;message&gt; calls.
 pub type RaiseCallbacks =
     Arc<RwLock<Vec<Box<dyn for<'a> Fn(&'a PGRaise) + Send + Sync + 'static>>>>;
+
+///
+/// Wraps a [`PGNotifier`] and reconnects upon connection loss.
+///
+/// This struct keeps a callback that can be use to spawn new connections to postgres.
+/// It's called upon each time a connection is lost. All the heavy lifting is actually
+/// done by the [`PGNotifier`] struct.
+///
+#[allow(unused)]
+pub struct PGRobustNotifier<F> {
+    notify_callbacks: NotifyCallbacks,
+    raise_callbacks: RaiseCallbacks,
+    subscriptions: Vec<JoinHandle<()>>,
+    connect: F,
+    inner: PGNotifier,
+}
+
+impl<F, S, T> PGRobustNotifier<F>
+where
+    F: AsyncFn() -> PGResult<(PGClient, PGConnection<S, T>)>,
+    S: AsyncRead + AsyncWrite + Unpin + Send + Sync + 'static,
+    T: AsyncRead + AsyncWrite + Unpin + Send + Sync + 'static,
+{
+    pub async fn new(connect: F) -> PGResult<Self> {
+        //
+        let (client, conn) = connect().await?;
+        let inner = PGNotifier::spawn(client, conn);
+        let notify_callbacks = inner.notify_callbacks.clone();
+        let raise_callbacks = inner.raise_callbacks.clone();
+
+        Ok(Self {
+            notify_callbacks,
+            raise_callbacks,
+            subscriptions: vec![],
+            connect,
+            inner,
+        })
+    }
+
+    ///
+    /// Attempts to reconnect after a connection loss.
+    ///
+    async fn reconnect(&mut self) -> PGResult<()> {
+        let (client, conn) = (self.connect)().await?;
+        self.inner =
+            PGNotifier::respawn(client, conn, &self.notify_callbacks, &self.raise_callbacks)
+                .await?;
+        Ok(())
+    }
+
+    ///
+    /// Returns the underlying postgres client.
+    /// If the connection has been closed then it is reconnected.
+    ///
+    /// Note that `Client::is_closed` is not reliable unless we have a high frequency TPC keepalive,
+    /// over which we have no control. So we actually attempt a real query each time. Taking inspiration
+    /// from sqlx, we issue a comment request so that it does not show up in logs. The possibility of
+    /// the connection being closed right after the ping still exist but should be handled by the
+    /// caller.
+    ///
+    /// The pool will keep trying to reconnect until it succeeds using exponential backoff with
+    /// additional jitter.
+    ///
+    pub async fn client(&mut self) -> PGResult<&PGClient> {
+        if let Err(e) = self.inner.client.execute("/* PING */", &[]).await
+            && e.is_closed()
+        {
+            // We implement exponential backoff + jitter.
+            let mut k = 1;
+            let mut attempts = 1;
+
+            loop {
+                tracing::info!("Connection is closed. Reconnect attempt #{}", attempts);
+                attempts += 1;
+
+                match self.reconnect().await {
+                    Ok(_) => {
+                        break;
+                    }
+                    Err(e) if e.is_closed() => {
+                        k *= std::cmp::min(k, 60);
+                        let t = k + rand::random_range(0..k);
+                        tokio::time::sleep(tokio::time::Duration::from_secs(t)).await;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+
+        Ok(&self.inner.client)
+    }
+
+    // Forwards the call to the inner notifier.
+    pub async fn subscribe_notify<CB>(
+        &mut self,
+        channel: impl Into<String>,
+        callback: CB,
+    ) -> PGResult<()>
+    where
+        CB: Fn(&PGNotify) + Send + Sync + 'static,
+    {
+        self.inner.subscribe_notify(channel, callback).await
+    }
+
+    // Forwards the call to the inner notifier.
+    pub async fn subscribe_raise(&mut self, callback: impl Fn(&PGRaise) + Send + Sync + 'static) {
+        self.inner.subscribe_raise(callback)
+    }
+
+    // Forwards the call to the inner notifier.
+    pub async fn capture_log(&mut self) -> Option<Vec<PGRaise>> {
+        self.inner.capture_log()
+    }
+
+    // Forwards the call to the inner notifier.
+    pub async fn with_captured_log<CB, Data>(&mut self, f: CB) -> PGResult<(Data, Vec<PGRaise>)>
+    where
+        CB: AsyncFnOnce(&PGClient) -> PGResult<Data>,
+    {
+        self.inner.with_captured_log(f).await
+    }
+}
 
 ///
 /// Forwards PostgreSQL `NOTIFY` and `RAISE` commands to subscribers.
@@ -176,6 +302,35 @@ impl PGNotifier {
     }
 
     ///
+    /// Spawns a new postgres client/connection pair after detecting that connection was lost.
+    ///
+    pub async fn respawn<S, T>(
+        client: PGClient,
+        conn: PGConnection<S, T>,
+        notify_callbacks: &NotifyCallbacks,
+        raise_callbacks: &RaiseCallbacks,
+    ) -> PGResult<Self>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + Sync + 'static,
+        T: AsyncRead + AsyncWrite + Unpin + Send + Sync + 'static,
+    {
+        let mut notifier = Self::spawn(client, conn);
+        notifier.notify_callbacks = notify_callbacks.clone();
+        notifier.raise_callbacks = raise_callbacks.clone();
+
+        if let Ok(guard) = notify_callbacks.read() {
+            let sql = guard
+                .keys()
+                .map(|channel| format!("LISTEN {}", channel))
+                .collect::<Vec<_>>()
+                .join(";\n");
+            notifier.client.batch_execute(&sql).await?;
+        }
+
+        Ok(notifier)
+    }
+
+    ///
     /// Handles the notification of LISTEN/NOTIFY subscribers.
     ///
     fn handle_notify(callbacks: &NotifyCallbacks, note: Notification) {
@@ -228,7 +383,7 @@ impl PGNotifier {
         &mut self,
         channel: impl Into<String>,
         callback: F,
-    ) -> Result<(), tokio_postgres::Error>
+    ) -> PGResult<()>
     where
         F: Fn(&PGNotify) + Send + Sync + 'static,
     {
@@ -285,12 +440,9 @@ impl PGNotifier {
     /// If you use query pipelining then collect the logs for all queries in
     /// the pipeline. Otherwise, the logs might not be what you expect.
     ///
-    pub async fn with_captured_log<F, T>(
-        &self,
-        f: F,
-    ) -> Result<(T, Vec<PGRaise>), tokio_postgres::Error>
+    pub async fn with_captured_log<F, T>(&self, f: F) -> PGResult<(T, Vec<PGRaise>)>
     where
-        F: AsyncFnOnce(&PGClient) -> Result<T, tokio_postgres::Error>,
+        F: AsyncFnOnce(&PGClient) -> PGResult<T>,
     {
         self.capture_log(); // clear the log
         let result = f(&self.client).await?;
@@ -427,9 +579,12 @@ impl FromStr for PGRaiseLevel {
 #[cfg(test)]
 mod tests {
 
-    use super::{PGNotifier, PGNotify};
+    use super::{PGClient, PGNotifier, PGNotify, PGRobustNotifier};
     use insta::*;
-    use std::sync::{Arc, RwLock};
+    use std::sync::{
+        Arc, RwLock,
+        atomic::{AtomicI32, Ordering},
+    };
     use testcontainers::{ImageExt, runners::AsyncRunner};
     use testcontainers_modules::postgres::Postgres;
 
@@ -512,5 +667,44 @@ mod tests {
         let guard = notices.read().expect("could not read notices");
         let raise_notices = guard.clone();
         assert_json_snapshot!("listen/notify", &raise_notices);
+
+        // --------------------------------------------------------------------
+        // RobustNotifier
+        // --------------------------------------------------------------------
+
+        let counter = Arc::new(AtomicI32::new(0));
+        let (client, conn) = tokio_postgres::connect(&database_url, tokio_postgres::NoTls)
+            .await
+            .expect("could not connect to postgres server");
+        let admin = PGNotifier::spawn(client, conn);
+
+        let database_url = database_url.to_string();
+        let counter_clone = counter.clone();
+        let mut notifier = PGRobustNotifier::new(async move || {
+            counter_clone.fetch_add(1, Ordering::Relaxed);
+            tokio_postgres::connect(&database_url, tokio_postgres::NoTls).await
+        })
+        .await
+        .expect("could not connect to postgres server");
+
+        let client: &PGClient = notifier.client().await.expect("could not get client");
+        assert!(client.execute("select 1", &[]).await.is_ok());
+
+        admin
+            .client
+            .execute(
+                r#"
+                SELECT pg_terminate_backend(pg_stat_activity.pid)
+                FROM pg_stat_activity
+                WHERE pid <> pg_backend_pid();
+            "#,
+                &[],
+            )
+            .await
+            .expect("could kill other connections");
+
+        let client: &PGClient = notifier.client().await.expect("could not get client");
+        assert!(client.execute("select 1", &[]).await.is_ok());
+        assert!(counter.load(Ordering::Relaxed) == 2);
     }
 }

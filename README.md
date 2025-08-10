@@ -6,7 +6,6 @@
 
 
 [`PGNotifier`] makes it easy to subscribe to PostgreSQL notifications.
-
 There are few examples in Rust that show how to capture these notifications
 mostly because tokio_postgres examples spawn off the connection half such
 that you can't listen for notifications anymore. [`PGNotifier`] also spawns
@@ -15,6 +14,13 @@ a task for the connection, but it also listens for notifications.
 [`PGNotifier`] maintains a two list of callback functions, which are called
 every time the it receives a notification. These two lists match the types
 of notifications sent by Postgres: `NOTIFY` and `RAISE`.
+
+[`PGRobustNotifier`] takes it a step further by wrapping a [`PGNotifier`] 
+and providing automatic reconnection when a closed connection is detected.
+It currently performs an infinite loop until such time the connection is 
+established using exponential backoff with jitter but with a maximum 
+backoff time of 1 minute + jitter. 
+
 
 ## LISTEN/NOTIFY
 
