@@ -1,0 +1,14 @@
+---
+source: src/lib.rs
+expression: extract_and_clear_logs(&notices)
+---
+<timestamp>       DEBUG: this is a DEBUG notification
+<timestamp>         LOG: this is a LOG notification
+<timestamp>        INFO: this is a INFO notification
+<timestamp>      NOTICE: this is a NOTICE notification
+<timestamp>     WARNING: this is a WARNING notification
+<timestamp>      NOTIFY: <pid> sent test=test#1
+<timestamp>      NOTIFY: <pid> sent test=test#2
+<timestamp>      NOTIFY: <pid> sent test=test#3
+<timestamp>      NOTIFY: <pid> sent test=test#4
+<timestamp>      NOTIFY: <pid> sent test=test#5

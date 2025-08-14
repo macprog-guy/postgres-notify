@@ -1,0 +1,20 @@
+---
+source: src/lib.rs
+expression: "&execution_log"
+---
+[
+  {
+    "Raise": {
+      "timestamp": "<timestamp>",
+      "level": "INFO",
+      "message": "this is a INFO notification"
+    }
+  },
+  {
+    "Raise": {
+      "timestamp": "<timestamp>",
+      "level": "WARNING",
+      "message": "this is a WARNING notification"
+    }
+  }
+]

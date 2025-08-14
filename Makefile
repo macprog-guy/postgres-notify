@@ -1,3 +1,6 @@
+tests-no-capture:
+	cargo insta test --all-targets -- --no-capture
+
 tests:
 	cargo insta test --all-targets
 

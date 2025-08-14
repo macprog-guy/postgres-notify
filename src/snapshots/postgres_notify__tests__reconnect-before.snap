@@ -1,0 +1,7 @@
+---
+source: src/lib.rs
+expression: extract_and_clear_logs(&notices)
+---
+<timestamp>   RECONNECT: attempt #1 of 2
+<timestamp>        INFO: before sleep
+<timestamp>        INFO: after sleep

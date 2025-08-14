@@ -1,0 +1,7 @@
+---
+source: src/lib.rs
+expression: extract_and_clear_logs(&notices)
+---
+<timestamp>        INFO: before sleep
+<timestamp>     TIMEOUT: timeout after 1000ms
+<timestamp>   CANCELLED: server-side query cancelled

@@ -1,0 +1,6 @@
+---
+source: src/lib.rs
+expression: extract_and_clear_logs(&notices)
+---
+<timestamp>        INFO: this is a INFO notification
+<timestamp>     WARNING: this is a WARNING notification

@@ -1,0 +1,81 @@
+---
+source: src/lib.rs
+expression: "&execution_log"
+---
+[
+  {
+    "Raise": {
+      "timestamp": "<timestamp>",
+      "level": "DEBUG",
+      "message": "this is a DEBUG notification"
+    }
+  },
+  {
+    "Raise": {
+      "timestamp": "<timestamp>",
+      "level": "LOG",
+      "message": "this is a LOG notification"
+    }
+  },
+  {
+    "Raise": {
+      "timestamp": "<timestamp>",
+      "level": "INFO",
+      "message": "this is a INFO notification"
+    }
+  },
+  {
+    "Raise": {
+      "timestamp": "<timestamp>",
+      "level": "NOTICE",
+      "message": "this is a NOTICE notification"
+    }
+  },
+  {
+    "Raise": {
+      "timestamp": "<timestamp>",
+      "level": "WARNING",
+      "message": "this is a WARNING notification"
+    }
+  },
+  {
+    "Notify": {
+      "timestamp": "<timestamp>",
+      "process_id": "<pid>",
+      "channel": "test",
+      "payload": "test#1"
+    }
+  },
+  {
+    "Notify": {
+      "timestamp": "<timestamp>",
+      "process_id": "<pid>",
+      "channel": "test",
+      "payload": "test#2"
+    }
+  },
+  {
+    "Notify": {
+      "timestamp": "<timestamp>",
+      "process_id": "<pid>",
+      "channel": "test",
+      "payload": "test#3"
+    }
+  },
+  {
+    "Notify": {
+      "timestamp": "<timestamp>",
+      "process_id": "<pid>",
+      "channel": "test",
+      "payload": "test#4"
+    }
+  },
+  {
+    "Notify": {
+      "timestamp": "<timestamp>",
+      "process_id": "<pid>",
+      "channel": "test",
+      "payload": "test#5"
+    }
+  }
+]
