@@ -15,3 +15,6 @@ release:
 
 publish:
 	cargo publish
+
+make readme:
+	cargo readme > README.md
