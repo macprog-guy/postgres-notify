@@ -31,6 +31,9 @@ pub enum PGMessage {
         attempts: u32,
         max_attempts: u32,
     },
+    Connected {
+        timestamp: Timestamp,
+    },
     Timeout {
         timestamp: Timestamp,
         duration: Duration,
@@ -51,6 +54,12 @@ impl PGMessage {
             timestamp: current_timestamp(),
             attempts,
             max_attempts,
+        }
+    }
+
+    pub fn connected() -> Self {
+        Self::Connected {
+            timestamp: current_timestamp(),
         }
     }
 
@@ -96,6 +105,10 @@ impl Display for PGMessage {
                 } else {
                     write!(f, "{}{:>12}: attempt #{}", &ts, "RECONNECT", attempts)
                 }
+            }
+            Connected { timestamp } => {
+                let ts = format_timestamp(*timestamp);
+                write!(f, "{}{:>12}: connection established", &ts, "CONNECTED")
             }
             Timeout {
                 timestamp,

@@ -309,17 +309,22 @@ where
 
                     self.inner = inner;
 
-                    let subs: Vec<_> = self.config.subscriptions.iter().map(String::to_owned).collect();
-                    match self.inner.issue_listen(&subs).await {
-                        Ok(_) => {
-                            return Ok(());
+                    (self.config.callback)(PGMessage::connected());
+                    
+                    if let Some(sql) = self.config.full_connect_script() {
+                        match self.inner.simple_query(&sql).await {
+                            Ok(_) => {
+                                return Ok(());
+                            }
+                            Err(e) if is_pg_connection_issue(&e) => {
+                                continue;
+                            }
+                            Err(e) => {
+                                return Err(e.into());
+                            }
                         }
-                        Err(e) if is_pg_connection_issue(&e) => {
-                            continue;
-                        }
-                        Err(e) => {
-                            return Err(e.into());
-                        }
+                    } else {
+                        return Ok(());
                     }
                 }
                 Err(e) if e.is_pg_connection_issue() => {

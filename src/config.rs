@@ -104,4 +104,29 @@ where
     pub fn with_application_name(&mut self, application_name: impl Into<String>) {
         self.application_name = Some(application_name.into());
     }
+
+    pub fn full_connect_script(&self) -> Option<String> {
+        if self.application_name.is_none()
+            && self.connect_script.is_none()
+            && self.subscriptions.is_empty()
+        {
+            return None;
+        }
+
+        let mut script = String::with_capacity(512);
+        if let Some(name) = self.application_name.as_ref() {
+            script.push_str("SET application_name = '");
+            script.push_str(name);
+            script.push_str("';\n");
+        }
+        if let Some(sql) = self.connect_script.as_ref() {
+            script.push_str(sql);
+        }
+        for sub in &self.subscriptions {
+            script.push_str("LISTEN ");
+            script.push_str(sub);
+            script.push_str(";\n");
+        }
+        Some(script)
+    }
 }
