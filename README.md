@@ -22,8 +22,14 @@ and is able to handle the following:
 - Automatically reconnects if the connection is lost and uses
   exponential backoff with jitter to avoid thundering herd effect.
 
+- Supports an `connect_script`, which can be executed on connect.
+
 - Has a familiar API with an additional `timeout` argument.
 
+
+## BREAKING CHANGE in v0.3.2
+
+Configuration is done through the [`PGRobustClientConfig`] struct.
 
 
 ## BREAKING CHANGE in v0.3.0
@@ -53,7 +59,7 @@ will the client callback any time a `NOTIFY` message is received for any of
 the subscribed channels.
 
 ```rust
-use postgres_notify::{PGRobustClient, PGMessage};
+use postgres_notify::{PGRobustClientConfig, PGRobustClient, PGMessage};
 use tokio_postgres::NoTls;
 use std::time::Duration;
 
@@ -64,9 +70,12 @@ let rt = tokio::runtime::Builder::new_current_thread()
     .expect("could not start tokio runtime");
 
 rt.block_on(async move {
+
     let database_url = "postgres://postgres:postgres@localhost:5432/postgres";
-    let callback = |msg:PGMessage| println!("{:?}", &msg);
-    let mut client = PGRobustClient::spawn(database_url, NoTls, callback)
+    let config = PGRobustClientConfig::new(database_url, NoTls)
+        .callback(|msg:PGMessage| println!("{:?}", &msg));
+
+    let mut client = PGRobustClient::spawn(config)
         .await.expect("Could not connect to postgres");
 
     client.subscribe_notify(&["test"], Some(Duration::from_millis(100)))
@@ -94,7 +103,7 @@ then using client callback can be used to forwand the message on an
 asynchonous channel.
 
 ```rust
-use postgres_notify::{PGRobustClient, PGMessage};
+use postgres_notify::{PGRobustClient, PGRobustClientConfig, PGMessage};
 use tokio_postgres::NoTls;
 use std::time::Duration;
 
@@ -106,10 +115,11 @@ let rt = tokio::runtime::Builder::new_current_thread()
 
 rt.block_on(async move {
 
-    let callback = |msg:PGMessage| println!("{:?}", &msg);
-
     let database_url = "postgres://postgres:postgres@localhost:5432/postgres";
-    let mut client = PGRobustClient::spawn(database_url, NoTls, callback)
+    let config = PGRobustClientConfig::new(database_url, NoTls)
+        .callback(|msg:PGMessage| println!("{:?}", &msg));
+
+    let mut client = PGRobustClient::spawn(config)
         .await.expect("Could not connect to postgres");
 
     // Will capture the notices in a Vec
