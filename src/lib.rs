@@ -16,9 +16,15 @@
 //! - Automatically reconnects if the connection is lost and uses
 //!   exponential backoff with jitter to avoid thundering herd effect.
 //!
+//! - Supports an `connect_script`, which can be executed on connect.
+//! 
 //! - Has a familiar API with an additional `timeout` argument.
 //!
 //!
+//! # BREAKING CHANGE in v0.3.2
+//!
+//! Configuration is done through the [`PGRobustClientConfig`] struct.
+//! 
 //!
 //! # BREAKING CHANGE in v0.3.0
 //!
@@ -47,7 +53,7 @@
 //! the subscribed channels.
 //!
 //! ```rust
-//! use postgres_notify::{PGRobustClient, PGMessage};
+//! use postgres_notify::{PGRobustClientConfig, PGRobustClient, PGMessage};
 //! use tokio_postgres::NoTls;
 //! use std::time::Duration;
 //!
@@ -58,9 +64,12 @@
 //!     .expect("could not start tokio runtime");
 //!
 //! rt.block_on(async move {
+//!     
 //!     let database_url = "postgres://postgres:postgres@localhost:5432/postgres";
-//!     let callback = |msg:PGMessage| println!("{:?}", &msg);
-//!     let mut client = PGRobustClient::spawn(database_url, NoTls, callback)
+//!     let config = PGRobustClientConfig::new(database_url, NoTls)
+//!         .callback(|msg:PGMessage| println!("{:?}", &msg));
+//!
+//!     let mut client = PGRobustClient::spawn(config)
 //!         .await.expect("Could not connect to postgres");
 //!
 //!     client.subscribe_notify(&["test"], Some(Duration::from_millis(100)))
@@ -88,7 +97,7 @@
 //! asynchonous channel.
 //!
 //! ```rust
-//! use postgres_notify::{PGRobustClient, PGMessage};
+//! use postgres_notify::{PGRobustClient, PGRobustClientConfig, PGMessage};
 //! use tokio_postgres::NoTls;
 //! use std::time::Duration;
 //!
@@ -100,10 +109,11 @@
 //!
 //! rt.block_on(async move {
 //!
-//!     let callback = |msg:PGMessage| println!("{:?}", &msg);
-//!
 //!     let database_url = "postgres://postgres:postgres@localhost:5432/postgres";
-//!     let mut client = PGRobustClient::spawn(database_url, NoTls, callback)
+//!     let config = PGRobustClientConfig::new(database_url, NoTls)
+//!         .callback(|msg:PGMessage| println!("{:?}", &msg));
+//! 
+//!     let mut client = PGRobustClient::spawn(config)
 //!         .await.expect("Could not connect to postgres");
 //!
 //!     // Will capture the notices in a Vec
@@ -154,24 +164,26 @@
 mod error;
 mod messages;
 mod notify;
+mod config;
+mod inner;
 
 pub use error::*;
 pub use messages::*;
+use inner::*;
+pub use config::*;
+
 use tokio_postgres::{SimpleQueryMessage, ToStatement};
 
 use {
     futures::TryFutureExt,
     std::{
-        collections::BTreeSet,
-        sync::{Arc, RwLock},
         time::Duration,
     },
     tokio::{
-        task::JoinHandle,
         time::{sleep, timeout},
     },
     tokio_postgres::{
-        CancelToken, Client as PGClient, Row, RowStream, Socket, Statement, Transaction,
+        Row, RowStream, Socket, Statement, Transaction,
         tls::MakeTlsConnect,
         types::{BorrowToSql, ToSql, Type},
     },
@@ -180,20 +192,12 @@ use {
 /// Shorthand for Result with tokio_postgres::Error
 pub type PGResult<T> = Result<T, PGError>;
 
+
+
 pub struct PGRobustClient<TLS>
-where
-    TLS: MakeTlsConnect<Socket>,
 {
-    database_url: String,
-    make_tls: TLS,
-    client: PGClient,
-    conn_handle: JoinHandle<()>,
-    cancel_token: CancelToken,
-    subscriptions: BTreeSet<String>,
-    callback: Arc<dyn Fn(PGMessage) + Send + Sync + 'static>,
-    max_reconnect_attempts: u32,
-    default_timeout: Duration,
-    log: Arc<RwLock<Vec<PGMessage>>>,
+    config: PGRobustClientConfig<TLS>,
+    inner: PGClient,
 }
 
 #[allow(unused)]
@@ -203,113 +207,39 @@ where
     <TLS as MakeTlsConnect<Socket>>::Stream: Send + Sync + 'static,
 {
     ///
-    /// Given a connect factory and a callback, returns a new [`PGRobustClient`].
-    ///
-    /// The callback will be called whenever a new NOTIFY/RAISE message is received.
-    /// Furthermore, it is also called with a [`PGMessage::Timeout`], when a query
-    /// times out, [`PGMessage::Disconnected`] if the internal state of the client
-    /// is not as expected (Poisoned lock, dropped connections, etc.) or
-    /// [`PGMessage::Reconnect`] whenever a new reconnect attempt is made.
-    ///
-    pub async fn spawn(
-        database_url: impl AsRef<str>,
-        make_tls: TLS,
-        callback: impl Fn(PGMessage) + Send + Sync + 'static,
-    ) -> PGResult<Self> {
-        //
-        // Setup log and other default values
-        //
-        let log = Arc::new(RwLock::new(Vec::default()));
-        let default_timeout = Duration::from_secs(60 * 60);
-
-        //
-        // We wrap the callback so that it also inserts into the log.
-        //
-        // NOTE: we need to type erase here because otherwise the call to Self::connect
-        //      will not compile.
-        //
-        let callback: Arc<dyn Fn(PGMessage) + Send + Sync + 'static> = Arc::new({
-            let log = log.clone();
-            move |msg: PGMessage| {
-                callback(msg.clone());
-                if let Ok(mut log) = log.write() {
-                    log.push(msg);
-                }
-            }
-        });
-
-        // Connect to the database
-        let (client, conn_handle, cancel_token) =
-            Self::connect(database_url.as_ref(), &make_tls, &callback).await?;
-
-        Ok(Self {
-            database_url: database_url.as_ref().to_string(),
-            make_tls,
-            client,
-            conn_handle,
-            cancel_token,
-            subscriptions: BTreeSet::new(),
-            callback,
-            max_reconnect_attempts: u32::MAX,
-            default_timeout,
-            log,
-        })
+    /// Connects to the database and returns a new client.
+    /// 
+    pub async fn spawn(config: PGRobustClientConfig<TLS>) -> PGResult<PGRobustClient<TLS>> {
+        let inner = PGClient::connect(&config).await?;
+        Ok(PGRobustClient { config, inner })
     }
 
     ///
-    /// Sets the default timeout for all queries. Defaults to 1 hour.
-    ///
-    /// This function consumes and returns self and is therefor usually used
-    /// just after [`PGRobustClient::spawn`].
-    ///
-    pub fn with_default_timeout(mut self, timeout: Duration) -> Self {
-        self.default_timeout = timeout;
-        self
+    /// Returns a reference to the config object used to create this client.
+    /// 
+    pub fn config(&self) -> &PGRobustClientConfig<TLS> {
+        &self.config
     }
 
     ///
-    /// Sets the maximum number of reconnect attempts before giving up.
-    /// Defaults to `u32::MAX`.
+    /// Returns a mutable reference to the config object used to create this client.
+    /// Some changes only take effect on the next connection. Others are immediate.
     ///
-    /// This function consumes and returns self and is therefor usually used
-    /// just after [`PGRobustClient::spawn`].
+    pub fn config_mut(&mut self) -> &mut PGRobustClientConfig<TLS> {
+        &mut self.config
+    }   
+    
     ///
-    pub fn with_max_reconnect_attempts(mut self, max_attempts: u32) -> Self {
-        self.max_reconnect_attempts = max_attempts;
-        self
-    }
-
-    ///
-    /// PRIVATE
-    /// Does the necessary details to connect to the database and hookup callbacks and notifications.
-    ///
-    async fn connect(
-        database_url: &str,
-        make_tls: &TLS,
-        callback: &Arc<dyn Fn(PGMessage) + Send + Sync + 'static>,
-    ) -> PGResult<(PGClient, JoinHandle<()>, CancelToken)> {
-        //
-        let (client, conn) = tokio_postgres::connect(database_url, make_tls.clone()).await?;
-        let cancel_token = client.cancel_token();
-
-        let callback = callback.clone();
-        let handle = tokio::spawn(notify::handle_connection_polling(conn, move |msg| {
-            callback(msg)
-        }));
-
-        Ok((client, handle, cancel_token))
-    }
-
-    ///
-    /// Cancels any in-progress query.
+    /// Cancels any query in-progress.
     ///
     /// This is the only function that does not take a timeout nor does it
     /// attempt to reconnect if the connection is lost. It will simply
     /// return the original error.
     ///
     pub async fn cancel_query(&mut self) -> PGResult<()> {
-        self.cancel_token
-            .cancel_query(self.make_tls.clone())
+        self.inner
+            .cancel_token
+            .cancel_query(self.config.make_tls.clone())
             .await
             .map_err(Into::into)
     }
@@ -319,7 +249,7 @@ where
     /// It also clears the log.
     ///
     pub fn capture_and_clear_log(&mut self) -> Vec<PGMessage> {
-        if let Ok(mut guard) = self.log.write() {
+        if let Ok(mut guard) = self.inner.log.write() {
             let empty_log = Vec::default();
             std::mem::replace(&mut *guard, empty_log)
         } else {
@@ -355,13 +285,13 @@ where
     /// If an error unrelated to establishing a new connection is returned
     /// when trying to connect then that error is returned.
     ///
-    pub async fn reconnect(&mut self) -> PGResult<()> {
+    async fn reconnect(&mut self) -> PGResult<()> {
         //
         use std::cmp::{max, min};
         let mut attempts = 1;
         let mut k = 500;
 
-        while attempts <= self.max_reconnect_attempts {
+        while attempts <= self.config.max_reconnect_attempts {
             //
             // Implement exponential backoff + jitter
             // Initial delay will be 500ms, max delay is 1h.
@@ -370,26 +300,17 @@ where
             k = min(k * 2, 60000);
 
             tracing::info!("Reconnect attempt #{}", attempts);
-            (self.callback)(PGMessage::reconnect(attempts, self.max_reconnect_attempts));
+            (self.config.callback)(PGMessage::reconnect(attempts, self.config.max_reconnect_attempts));
 
             attempts += 1;
 
-            let maybe_triple =
-                Self::connect(&self.database_url, &self.make_tls, &self.callback).await;
+            match PGClient::connect(&self.config).await {
+                Ok(inner) => {
 
-            match maybe_triple {
-                Ok((client, conn_handle, cancel_token)) => {
-                    // Abort the old connection just in case
-                    self.conn_handle.abort();
+                    self.inner = inner;
 
-                    self.client = client;
-                    self.conn_handle = conn_handle;
-                    self.cancel_token = cancel_token;
-
-                    // Resubscribe to previously subscribed channels
-                    let subs: Vec<_> = self.subscriptions.iter().map(String::from).collect();
-
-                    match Self::subscribe_notify_impl(&self.client, &subs).await {
+                    let subs: Vec<_> = self.config.subscriptions.iter().map(String::to_owned).collect();
+                    match self.inner.issue_listen(&subs).await {
                         Ok(_) => {
                             return Ok(());
                         }
@@ -411,19 +332,26 @@ where
         }
 
         // Issue the failed to reconnect message
-        (self.callback)(PGMessage::failed_to_reconnect(self.max_reconnect_attempts));
+        (self.config.callback)(PGMessage::failed_to_reconnect(self.config.max_reconnect_attempts));
         // Return the error
-        Err(PGError::FailedToReconnect(self.max_reconnect_attempts))
+        Err(PGError::FailedToReconnect(self.config.max_reconnect_attempts))
     }
 
+
+    ///
+    /// Wraps most calls that use the client with a timeout and reconnect loop.
+    /// 
+    /// If you loose the connection during a query, the client will automatically 
+    /// reconnect and retry the query.
+    /// 
     pub async fn wrap_reconnect<T>(
         &mut self,
         max_dur: Option<Duration>,
         factory: impl AsyncFn(&mut PGClient) -> Result<T, tokio_postgres::Error>,
     ) -> PGResult<T> {
-        let max_dur = max_dur.unwrap_or(self.default_timeout);
+        let max_dur = max_dur.unwrap_or(self.config.default_timeout);
         loop {
-            match timeout(max_dur, factory(&mut self.client)).await {
+            match timeout(max_dur, factory(&mut self.inner)).await {
                 // Query succeeded so return the result
                 Ok(Ok(o)) => return Ok(o),
                 // Query failed because of connection issues
@@ -437,11 +365,11 @@ where
                 // Query timed out!
                 Err(_) => {
                     // Callback with timeout message
-                    (self.callback)(PGMessage::timeout(max_dur));
+                    (self.config.callback)(PGMessage::timeout(max_dur));
                     // Cancel the ongoing query
-                    let status = self.cancel_token.cancel_query(self.make_tls.clone()).await;
+                    let status = self.inner.cancel_token.cancel_query(self.config.make_tls.clone()).await;
                     // Callback with cancelled message
-                    (self.callback)(PGMessage::cancelled(!status.is_err()));
+                    (self.config.callback)(PGMessage::cancelled(!status.is_err()));
                     // Return the timeout error
                     return Err(PGError::Timeout(max_dur));
                 }
@@ -454,46 +382,21 @@ where
         channels: &[impl AsRef<str> + Send + Sync + 'static],
         timeout: Option<Duration>,
     ) -> PGResult<()> {
+
         if !channels.is_empty() {
+            // Issue the `LISTEN` commands with protection
             self.wrap_reconnect(timeout, async |client: &mut PGClient| {
-                Self::subscribe_notify_impl(client, channels).await
+                PGClient::issue_listen(client, channels).await
             })
             .await?;
 
             // Add to our subscriptions
-            channels.iter().for_each(|ch| {
-                self.subscriptions.insert(ch.as_ref().to_string());
-            });
+            self.config.with_subscriptions(channels.iter().map(AsRef::as_ref));
         }
         Ok(())
     }
 
-    async fn subscribe_notify_impl(
-        client: &PGClient,
-        channels: &[impl AsRef<str> + Send + Sync + 'static],
-    ) -> Result<(), tokio_postgres::Error> {
-        // Build a sequence of `LISTEN` commands
-        let sql = channels
-            .iter()
-            .map(|ch| format!("LISTEN {};", ch.as_ref()))
-            .collect::<Vec<_>>()
-            .join("\n");
 
-        // Tell the world we are about to subscribe
-        #[cfg(feature = "tracing")]
-        tracing::info!(
-            "Subscribing to channels: \"{}\"",
-            &channels
-                .iter()
-                .map(AsRef::as_ref)
-                .collect::<Vec<_>>()
-                .join(",")
-        );
-
-        // Issue the `LISTEN` commands
-        client.simple_query(&sql).await?;
-        Ok(())
-    }
 
     pub async fn unsubscribe_notify(
         &mut self,
@@ -501,35 +404,14 @@ where
         timeout: Option<Duration>,
     ) -> PGResult<()> {
         if !channels.is_empty() {
+            // Issue the `UNLISTEN` commands with protection
             self.wrap_reconnect(timeout, async move |client: &mut PGClient| {
-                // Build a sequence of `LISTEN` commands
-                let sql = channels
-                    .iter()
-                    .map(|ch| format!("UNLISTEN {};", ch.as_ref()))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-
-                // Tell the world we are about to subscribe
-                #[cfg(feature = "tracing")]
-                tracing::info!(
-                    "Unsubscribing from channels: \"{}\"",
-                    &channels
-                        .iter()
-                        .map(AsRef::as_ref)
-                        .collect::<Vec<_>>()
-                        .join(",")
-                );
-
-                // Issue the `LISTEN` commands
-                client.simple_query(&sql).await?;
-                Ok(())
+                PGClient::issue_unlisten(client, channels).await
             })
             .await?;
 
             // Remove subscriptions
-            channels.iter().for_each(|ch| {
-                self.subscriptions.remove(ch.as_ref());
-            });
+            self.config.without_subscriptions(channels.iter().map(AsRef::as_ref));
         }
         Ok(())
     }
@@ -548,6 +430,7 @@ where
         })
         .await
     }
+
 
     /// Like [`Client::execute_raw`].
     pub async fn execute_raw<P, I, T>(
@@ -735,9 +618,9 @@ where
         .await
     }
 
-    /// Returns a reference to the underlying [`Client`].
-    pub fn client(&self) -> &PGClient {
-        &self.client
+    /// Returns a reference to the underlying [`tokio_postgres::Client`].
+    pub fn client(&self) -> &tokio_postgres::Client {
+        &self.inner
     }
 }
 
@@ -755,7 +638,7 @@ pub async fn wrap_timeout<T>(dur: Duration, fut: impl Future<Output = PGResult<T
 mod tests {
 
     use {
-        super::{PGError, PGMessage, PGRaiseLevel, PGRobustClient},
+        super::{PGError, PGMessage, PGRaiseLevel, PGRobustClient, PGRobustClientConfig},
         insta::*,
         std::{
             sync::{Arc, RwLock},
@@ -823,14 +706,15 @@ mod tests {
             }
         };
 
-        let mut admin = PGRobustClient::spawn(&database_url, tokio_postgres::NoTls, |_| {})
+        let config = PGRobustClientConfig::new(database_url, tokio_postgres::NoTls);
+
+        let mut admin = PGRobustClient::spawn(config.clone())
             .await
             .expect("could not create initial client");
 
-        let mut client = PGRobustClient::spawn(&database_url, tokio_postgres::NoTls, callback)
+        let mut client = PGRobustClient::spawn(config.callback(callback).max_reconnect_attempts(2))
             .await
-            .expect("could not create initial client")
-            .with_max_reconnect_attempts(2);
+            .expect("could not create initial client");
 
         // --------------------------------------------------------------------
         // Subscribe to notify and raise
