@@ -74,8 +74,10 @@ where
         self
     }
 
-    pub fn with_max_reconnect_attempts(&mut self, max_reconnect_attempts: u32) {
-        self.max_reconnect_attempts = max_reconnect_attempts;
+    pub fn with_max_reconnect_attempts(&mut self, max_reconnect_attempts: Option<u32>) {
+        if let Some(n) = max_reconnect_attempts {
+            self.max_reconnect_attempts = n;
+        }
     }
 
     pub fn default_timeout(mut self, default_timeout: Duration) -> Self {
@@ -83,8 +85,10 @@ where
         self
     }
 
-    pub fn with_default_timeout(&mut self, default_timeout: Duration) {
-        self.default_timeout = default_timeout;
+    pub fn with_default_timeout(&mut self, default_timeout: Option<Duration>) {
+        if let Some(d) = default_timeout {
+            self.default_timeout = d;
+        }
     }
 
     pub fn connect_script(mut self, connect_script: impl Into<String>) -> Self {
@@ -92,8 +96,8 @@ where
         self
     }
 
-    pub fn with_connect_script(&mut self, connect_script: impl Into<String>) {
-        self.connect_script = Some(connect_script.into());
+    pub fn with_connect_script(&mut self, connect_script: Option<impl Into<String>>) {
+        self.connect_script = connect_script.map(Into::into);
     }
 
     pub fn application_name(mut self, application_name: impl Into<String>) -> Self {
@@ -101,8 +105,8 @@ where
         self
     }
 
-    pub fn with_application_name(&mut self, application_name: impl Into<String>) {
-        self.application_name = Some(application_name.into());
+    pub fn with_application_name(&mut self, application_name: Option<impl Into<String>>) {
+        self.application_name = application_name.map(Into::into);
     }
 
     pub fn full_connect_script(&self) -> Option<String> {
