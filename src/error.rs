@@ -8,6 +8,8 @@ pub enum PGError {
     Timeout(Duration),
     #[error("Failed to reconnect after {0} attempts")]
     FailedToReconnect(u32),
+    #[error(transparent)]
+    Other(Box<dyn std::error::Error + Send + Sync>),
 }
 
 impl PGError {
@@ -16,6 +18,10 @@ impl PGError {
     }
     pub fn is_timeout(&self) -> bool {
         matches!(self, PGError::Timeout(_))
+    }
+
+    pub fn other(err: impl std::error::Error + Send + Sync + 'static) -> Self {
+        PGError::Other(Box::new(err))
     }
 }
 
