@@ -299,6 +299,7 @@ where
             sleep(Duration::from_millis(k + rand::random_range(0..k / 2))).await;
             k = min(k * 2, 60000);
 
+            #[cfg(feature = "tracing")]
             tracing::info!("Reconnect attempt #{}", attempts);
             (self.config.callback)(PGMessage::reconnect(attempts, self.config.max_reconnect_attempts));
 

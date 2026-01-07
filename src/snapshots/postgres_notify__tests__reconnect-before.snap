@@ -2,6 +2,7 @@
 source: src/lib.rs
 expression: extract_and_clear_logs(&notices)
 ---
+<timestamp>DISCONNECTED: db error
 <timestamp>   RECONNECT: attempt #1 of 2
 <timestamp>   CONNECTED: connection established
 <timestamp>        INFO: before sleep

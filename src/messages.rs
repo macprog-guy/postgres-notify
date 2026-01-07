@@ -46,6 +46,10 @@ pub enum PGMessage {
         timestamp: Timestamp,
         attempts: u32,
     },
+    Disconnected {
+        timestamp: Timestamp,
+        reason: String,
+    },
 }
 
 impl PGMessage {
@@ -80,6 +84,13 @@ impl PGMessage {
         Self::FailedToReconnect {
             timestamp: current_timestamp(),
             attempts,
+        }
+    }
+
+    pub fn disconnected(reason: impl Into<String>) -> Self {
+        Self::Disconnected {
+            timestamp: current_timestamp(),
+            reason: reason.into(),
         }
     }
 }
@@ -142,6 +153,10 @@ impl Display for PGMessage {
                     "{}{:>12}: failed to reconnect after {} attempts",
                     &ts, "FAILURE", attempts
                 )
+            }
+            Disconnected { timestamp, reason } => {
+                let ts = format_timestamp(*timestamp);
+                write!(f, "{}{:>12}: {}", &ts, "DISCONNECTED", reason)
             }
         }
     }
@@ -221,7 +236,7 @@ pub struct PGRaiseMessage {
     pub timestamp: Timestamp,
     pub level: PGRaiseLevel,
     pub message: String,
-    #[serde(skip)]
+    #[cfg_attr(any(feature = "serde", test), serde(skip))]
     pub details: DbError,
 }
 
@@ -326,8 +341,7 @@ fn format_timestamp(ts: Timestamp) -> String {
 
     #[cfg(not(feature = "chrono"))]
     {
-        let duration = self
-            .timestamp
+        let duration = ts
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap();
         let millis = duration.as_millis();

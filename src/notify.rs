@@ -16,23 +16,30 @@ pub(crate) async fn handle_connection_polling<S, T>(
     S: AsyncRead + AsyncWrite + Unpin + Send + Sync + 'static,
     T: AsyncRead + AsyncWrite + Unpin + Send + Sync + 'static,
 {
-    let mut stream = stream::poll_fn(move |cx| conn.poll_message(cx).map_err(|e| panic!("{}", e)));
+    let mut stream = stream::poll_fn(move |cx| conn.poll_message(cx));
 
-    while let Some(msg) = stream.next().await {
-        match msg {
-            Ok(AsyncMessage::Notice(raise)) => {
+    loop {
+        match stream.next().await {
+            Some(Ok(AsyncMessage::Notice(raise))) => {
                 callback(raise.into());
             }
-            Ok(AsyncMessage::Notification(note)) => {
+            Some(Ok(AsyncMessage::Notification(note))) => {
                 callback(note.into());
             }
-            Ok(_) => {
-                // Some as of yet unhandled message type.
+            Some(Ok(_)) => {
+                // Unhandled message type
             }
-            _ => {
+            Some(Err(e)) => {
                 #[cfg(feature = "tracing")]
-                tracing::error!("connection to the server is closed");
-                #[cfg(not(feature = "tracing"))]
+                tracing::error!("Connection polling error: {}", e);
+                callback(PGMessage::disconnected(e.to_string()));
+                break;
+            }
+            None => {
+                // Stream ended - connection closed normally
+                #[cfg(feature = "tracing")]
+                tracing::info!("Connection closed");
+                callback(PGMessage::disconnected("connection closed"));
                 break;
             }
         }
