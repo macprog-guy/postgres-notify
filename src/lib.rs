@@ -160,6 +160,18 @@
 //! it uses a exponential backoff with jitter in order to avoid thundering
 //! herd effect.
 //!
+//!
+//! # CALLBACK SAFETY
+//!
+//! The callback function runs in a background tokio task that polls the
+//! PostgreSQL connection. If the callback panics:
+//!
+//! - The `RwLock` protecting the message log will be poisoned
+//! - Subsequent calls to [`capture_and_clear_log`](PGRobustClient::capture_and_clear_log) will return empty vectors
+//! - The connection polling task will terminate
+//!
+//! **Recommendation**: Ensure callbacks do not panic. Use `std::panic::catch_unwind`
+//! if calling untrusted code within the callback.
 
 mod error;
 mod messages;
@@ -249,11 +261,25 @@ where
     /// It also clears the log.
     ///
     pub fn capture_and_clear_log(&mut self) -> Vec<PGMessage> {
+        match self.inner.log.write() {
+            Ok(mut guard) => {
+                let empty_log = Vec::default();
+                std::mem::replace(&mut *guard, empty_log)
+            }
+            Err(_) => {
+                #[cfg(feature = "tracing")]
+                tracing::error!("Lock poisoned in capture_and_clear_log - returning empty log");
+                Vec::default()
+            }
+        }
+    }
+
+    ///
+    /// Clears the message log without returning its contents.
+    ///
+    fn clear_log(&mut self) {
         if let Ok(mut guard) = self.inner.log.write() {
-            let empty_log = Vec::default();
-            std::mem::replace(&mut *guard, empty_log)
-        } else {
-            Vec::default()
+            guard.clear();
         }
     }
 
@@ -346,15 +372,21 @@ where
 
     ///
     /// Wraps most calls that use the client with a timeout and reconnect loop.
-    /// 
-    /// If you loose the connection during a query, the client will automatically 
+    ///
+    /// If you lose the connection during a query, the client will automatically
     /// reconnect and retry the query.
-    /// 
+    ///
+    /// **Note**: This method clears the message log at the start of each call.
+    /// Messages from previous operations are discarded. Use [`with_captured_log`](Self::with_captured_log)
+    /// if you need to preserve and retrieve messages from a specific operation.
+    ///
     pub async fn wrap_reconnect<T>(
         &mut self,
         max_dur: Option<Duration>,
         factory: impl AsyncFn(&mut PGClient) -> Result<T, tokio_postgres::Error>,
     ) -> PGResult<T> {
+        // Clear any accumulated messages from previous operations
+        self.clear_log();
         let max_dur = max_dur.unwrap_or(self.config.default_timeout);
         loop {
             match timeout(max_dur, factory(&mut self.inner)).await {
@@ -459,6 +491,11 @@ where
     }
 
     /// Like [`Client::query`].
+    ///
+    /// **Note**: Parameters are cloned into a `Vec` before the async operation
+    /// to satisfy lifetime requirements. For bulk operations with many large
+    /// parameters, consider using [`query_raw`](Self::query_raw) or [`execute_raw`](Self::execute_raw)
+    /// which may be more efficient depending on your use case.
     pub async fn query<T>(
         &mut self,
         query: &T,
@@ -653,6 +690,275 @@ mod tests {
         testcontainers::{ImageExt, runners::AsyncRunner},
         testcontainers_modules::postgres::Postgres,
     };
+
+    // ========================================================================
+    // UNIT TESTS (no database required)
+    // ========================================================================
+
+    mod unit {
+        use super::*;
+        use tokio_postgres::NoTls;
+
+        // --------------------------------------------------------------------
+        // Config Builder Tests
+        // --------------------------------------------------------------------
+
+        #[test]
+        fn config_default_values() {
+            let config = PGRobustClientConfig::new("postgres://localhost/test", NoTls);
+
+            assert_eq!(config.max_reconnect_attempts, 10);
+            assert_eq!(config.default_timeout, Duration::from_secs(3600));
+            assert!(config.subscriptions.is_empty());
+            assert!(config.connect_script.is_none());
+            assert!(config.application_name.is_none());
+        }
+
+        #[test]
+        fn config_builder_chaining() {
+            let config = PGRobustClientConfig::new("postgres://localhost/test", NoTls)
+                .max_reconnect_attempts(5)
+                .default_timeout(Duration::from_secs(30))
+                .application_name("test_app")
+                .connect_script("SET timezone = 'UTC'")
+                .subscriptions(["channel1", "channel2"]);
+
+            assert_eq!(config.max_reconnect_attempts, 5);
+            assert_eq!(config.default_timeout, Duration::from_secs(30));
+            assert_eq!(config.application_name, Some("test_app".to_string()));
+            assert_eq!(config.connect_script, Some("SET timezone = 'UTC'".to_string()));
+            assert!(config.subscriptions.contains("channel1"));
+            assert!(config.subscriptions.contains("channel2"));
+        }
+
+        #[test]
+        fn config_with_methods() {
+            let mut config = PGRobustClientConfig::new("postgres://localhost/test", NoTls);
+
+            config.with_max_reconnect_attempts(Some(3));
+            config.with_default_timeout(Some(Duration::from_secs(60)));
+            config.with_application_name(Some("my_app"));
+            config.with_connect_script(Some("SELECT 1"));
+            config.with_subscriptions(["events"]);
+
+            assert_eq!(config.max_reconnect_attempts, 3);
+            assert_eq!(config.default_timeout, Duration::from_secs(60));
+            assert_eq!(config.application_name, Some("my_app".to_string()));
+            assert_eq!(config.connect_script, Some("SELECT 1".to_string()));
+            assert!(config.subscriptions.contains("events"));
+        }
+
+        #[test]
+        fn config_full_connect_script_empty() {
+            let config = PGRobustClientConfig::new("postgres://localhost/test", NoTls);
+            assert!(config.full_connect_script().is_none());
+        }
+
+        #[test]
+        fn config_full_connect_script_with_app_name() {
+            let config = PGRobustClientConfig::new("postgres://localhost/test", NoTls)
+                .application_name("my_app");
+
+            let script = config.full_connect_script().unwrap();
+            assert!(script.contains("SET application_name = 'my_app'"));
+        }
+
+        #[test]
+        fn config_full_connect_script_with_subscriptions() {
+            let config = PGRobustClientConfig::new("postgres://localhost/test", NoTls)
+                .subscriptions(["chan1", "chan2"]);
+
+            let script = config.full_connect_script().unwrap();
+            assert!(script.contains("LISTEN chan1;"));
+            assert!(script.contains("LISTEN chan2;"));
+        }
+
+        #[test]
+        fn config_full_connect_script_combined() {
+            let config = PGRobustClientConfig::new("postgres://localhost/test", NoTls)
+                .application_name("app")
+                .connect_script("SET timezone = 'UTC';")
+                .subscriptions(["events"]);
+
+            let script = config.full_connect_script().unwrap();
+            assert!(script.contains("SET application_name = 'app'"));
+            assert!(script.contains("SET timezone = 'UTC';"));
+            assert!(script.contains("LISTEN events;"));
+        }
+
+        #[test]
+        fn config_without_subscriptions() {
+            let mut config = PGRobustClientConfig::new("postgres://localhost/test", NoTls)
+                .subscriptions(["a", "b", "c"]);
+
+            config.without_subscriptions(["b"]);
+
+            assert!(config.subscriptions.contains("a"));
+            assert!(!config.subscriptions.contains("b"));
+            assert!(config.subscriptions.contains("c"));
+        }
+
+        // --------------------------------------------------------------------
+        // PGError Tests
+        // --------------------------------------------------------------------
+
+        #[test]
+        fn error_timeout_display() {
+            let err = PGError::Timeout(Duration::from_secs(30));
+            let msg = err.to_string();
+            assert!(msg.contains("timed out"));
+            assert!(msg.contains("30"));
+        }
+
+        #[test]
+        fn error_failed_to_reconnect_display() {
+            let err = PGError::FailedToReconnect(5);
+            let msg = err.to_string();
+            assert!(msg.contains("5"));
+            assert!(msg.contains("reconnect"));
+        }
+
+        #[test]
+        fn error_is_timeout() {
+            let timeout_err = PGError::Timeout(Duration::from_secs(1));
+            let reconnect_err = PGError::FailedToReconnect(1);
+
+            assert!(timeout_err.is_timeout());
+            assert!(!reconnect_err.is_timeout());
+        }
+
+        #[test]
+        fn error_other() {
+            let custom_err = std::io::Error::new(std::io::ErrorKind::Other, "custom error");
+            let pg_err = PGError::other(custom_err);
+
+            assert!(matches!(pg_err, PGError::Other(_)));
+            assert!(pg_err.to_string().contains("custom error"));
+        }
+
+        // --------------------------------------------------------------------
+        // PGMessage Tests
+        // --------------------------------------------------------------------
+
+        #[test]
+        fn message_reconnect_creation() {
+            let msg = PGMessage::reconnect(3, 10);
+            match msg {
+                PGMessage::Reconnect { attempts, max_attempts, .. } => {
+                    assert_eq!(attempts, 3);
+                    assert_eq!(max_attempts, 10);
+                }
+                _ => panic!("Expected Reconnect variant"),
+            }
+        }
+
+        #[test]
+        fn message_connected_creation() {
+            let msg = PGMessage::connected();
+            assert!(matches!(msg, PGMessage::Connected { .. }));
+        }
+
+        #[test]
+        fn message_timeout_creation() {
+            let msg = PGMessage::timeout(Duration::from_secs(5));
+            match msg {
+                PGMessage::Timeout { duration, .. } => {
+                    assert_eq!(duration, Duration::from_secs(5));
+                }
+                _ => panic!("Expected Timeout variant"),
+            }
+        }
+
+        #[test]
+        fn message_cancelled_creation() {
+            let msg_success = PGMessage::cancelled(true);
+            let msg_failure = PGMessage::cancelled(false);
+
+            match msg_success {
+                PGMessage::Cancelled { success, .. } => assert!(success),
+                _ => panic!("Expected Cancelled variant"),
+            }
+            match msg_failure {
+                PGMessage::Cancelled { success, .. } => assert!(!success),
+                _ => panic!("Expected Cancelled variant"),
+            }
+        }
+
+        #[test]
+        fn message_failed_to_reconnect_creation() {
+            let msg = PGMessage::failed_to_reconnect(5);
+            match msg {
+                PGMessage::FailedToReconnect { attempts, .. } => {
+                    assert_eq!(attempts, 5);
+                }
+                _ => panic!("Expected FailedToReconnect variant"),
+            }
+        }
+
+        #[test]
+        fn message_disconnected_creation() {
+            let msg = PGMessage::disconnected("Connection reset");
+            match msg {
+                PGMessage::Disconnected { reason, .. } => {
+                    assert_eq!(reason, "Connection reset");
+                }
+                _ => panic!("Expected Disconnected variant"),
+            }
+        }
+
+        #[test]
+        fn message_display_reconnect() {
+            let msg = PGMessage::reconnect(2, 10);
+            let display = msg.to_string();
+            assert!(display.contains("RECONNECT"));
+            assert!(display.contains("2"));
+            assert!(display.contains("10"));
+        }
+
+        #[test]
+        fn message_display_timeout() {
+            let msg = PGMessage::timeout(Duration::from_millis(500));
+            let display = msg.to_string();
+            assert!(display.contains("TIMEOUT"));
+        }
+
+        // --------------------------------------------------------------------
+        // PGRaiseLevel Tests
+        // --------------------------------------------------------------------
+
+        #[test]
+        fn raise_level_from_str() {
+            use std::str::FromStr;
+
+            // Test all known levels parse correctly
+            assert!(PGRaiseLevel::from_str("DEBUG").is_ok());
+            assert!(PGRaiseLevel::from_str("LOG").is_ok());
+            assert!(PGRaiseLevel::from_str("INFO").is_ok());
+            assert!(PGRaiseLevel::from_str("NOTICE").is_ok());
+            assert!(PGRaiseLevel::from_str("WARNING").is_ok());
+            assert!(PGRaiseLevel::from_str("ERROR").is_ok());
+            assert!(PGRaiseLevel::from_str("FATAL").is_ok());
+            assert!(PGRaiseLevel::from_str("PANIC").is_ok());
+        }
+
+        #[test]
+        fn raise_level_display() {
+            assert_eq!(PGRaiseLevel::Debug.to_string(), "DEBUG");
+            assert_eq!(PGRaiseLevel::Log.to_string(), "LOG");
+            assert_eq!(PGRaiseLevel::Warning.to_string(), "WARNING");
+        }
+
+        #[test]
+        fn raise_level_unknown_returns_error() {
+            use std::str::FromStr;
+            assert!(PGRaiseLevel::from_str("UNKNOWN_LEVEL").is_err());
+            assert!(PGRaiseLevel::from_str("debug").is_err()); // case sensitive
+        }
+    }
+
+    // ========================================================================
+    // INTEGRATION TESTS (require database)
+    // ========================================================================
 
     fn sql_for_log_and_notify_test(level: PGRaiseLevel) -> String {
         format!(

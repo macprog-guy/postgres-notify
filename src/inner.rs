@@ -34,8 +34,12 @@ impl PGClient {
                 conn,
                 move |msg: PGMessage| {
                     callback(msg.clone());
-                    if let Ok(mut log) = log.write() {
-                        log.push(msg);
+                    match log.write() {
+                        Ok(mut log) => log.push(msg),
+                        Err(_) => {
+                            #[cfg(feature = "tracing")]
+                            tracing::error!("Lock poisoned in connection polling callback - log message dropped");
+                        }
                     }
                 },
             ))

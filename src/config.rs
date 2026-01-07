@@ -91,20 +91,48 @@ where
         }
     }
 
+    /// Sets a SQL script to execute immediately after connecting.
+    ///
+    /// # Security
+    ///
+    /// The provided script is executed directly as SQL. Avoid passing untrusted
+    /// user input. For dynamic values, validate against an allowlist or use
+    /// parameterized queries after connection.
     pub fn connect_script(mut self, connect_script: impl Into<String>) -> Self {
         self.connect_script = Some(connect_script.into());
         self
     }
 
+    /// Sets a SQL script to execute immediately after connecting.
+    ///
+    /// # Security
+    ///
+    /// The provided script is executed directly as SQL. Avoid passing untrusted
+    /// user input. For dynamic values, validate against an allowlist or use
+    /// parameterized queries after connection.
     pub fn with_connect_script(&mut self, connect_script: Option<impl Into<String>>) {
         self.connect_script = connect_script.map(Into::into);
     }
 
+    /// Sets the PostgreSQL application name for this connection.
+    ///
+    /// # Security
+    ///
+    /// The provided value is interpolated directly into a `SET application_name`
+    /// SQL statement. Avoid passing untrusted user input. For dynamic values,
+    /// validate against an allowlist of permitted application names.
     pub fn application_name(mut self, application_name: impl Into<String>) -> Self {
         self.application_name = Some(application_name.into());
         self
     }
 
+    /// Sets the PostgreSQL application name for this connection.
+    ///
+    /// # Security
+    ///
+    /// The provided value is interpolated directly into a `SET application_name`
+    /// SQL statement. Avoid passing untrusted user input. For dynamic values,
+    /// validate against an allowlist of permitted application names.
     pub fn with_application_name(&mut self, application_name: Option<impl Into<String>>) {
         self.application_name = application_name.map(Into::into);
     }
