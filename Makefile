@@ -1,7 +1,7 @@
-tests-no-capture:
+test-no-capture:
 	cargo insta test --all-targets -- --no-capture
 
-tests:
+test:
 	cargo insta test --all-targets
 
 review:
@@ -16,5 +16,5 @@ release:
 publish:
 	cargo publish
 
-make readme:
-	cargo readme > README.md
+audit:
+	cargo audit --ignore RUSTSEC-2025-0111 --ignore RUSTSEC-2025-0134Stre
